@@ -44,7 +44,7 @@ from . import *
 
 # Will move to strings
 alive_txt = """
-The Ultroid Userbot
+The Bloated Userbot
 
   ◍ Version - {}
   ◍ Py-Ultroid - {}
