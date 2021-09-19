@@ -25,11 +25,13 @@ from traceback import format_exc
 
 from pytgcalls import GroupCallFactory
 from pytgcalls.exceptions import GroupCallNotFoundError
+from telethon.errors.rpcerrorlist import ParticipantJoinMissingError
 from pyUltroid import HNDLR, LOGS, asst, udB, vcClient
 from pyUltroid.functions.all import (
     bash,
     downloader,
     get_user_id,
+    is_url_ok,
     get_videos_link,
     inline_mention,
     mediainfo,
@@ -65,9 +67,8 @@ def html_mention(event, sender_id=None, full_name=None):
 
 
 def VC_AUTHS():
-    _vc_sudos = udB.get("VC_SUDOS").split() if udB.get("VC_SUDOS") else ""
-    A_AUTH = [*owner_and_sudos(), *_vc_sudos]
-    return A_AUTH
+    _vcsudos = udB["VC_SUDOS"].split() if udB.get("VC_SUDOS") else ""
+    return [int(a) for a in [*owner_and_sudos(), *_vcsudos]]
 
 
 class Player:
@@ -125,9 +126,8 @@ class Player:
         if is_connected:
             if chat not in ACTIVE_CALLS:
                 ACTIVE_CALLS.append(chat)
-        else:
-            if chat in ACTIVE_CALLS:
-                ACTIVE_CALLS.remove(chat)
+        elif chat in ACTIVE_CALLS:
+            ACTIVE_CALLS.remove(chat)
 
     async def playout_ended_handler(self, call, source, mtype):
         if os.path.exists(source):
@@ -143,7 +143,11 @@ class Player:
             song, title, link, thumb, from_user, pos, dur = await get_from_queue(
                 chat_id
             )
-            await self.group_call.start_audio(song)
+            try:
+                await self.group_call.start_audio(song)
+            except ParticipantJoinMissingError:
+                await self.vc_joiner()
+                await self.group_call.start_audio(song)
             if MSGID_CACHE.get(chat_id):
                 await MSGID_CACHE[chat_id].delete()
                 del MSGID_CACHE[chat_id]
@@ -198,15 +202,23 @@ class Player:
 # --------------------------------------------------
 
 
-def vc_asst(dec, from_users=VC_AUTHS(), vc_auth=True):
+def vc_asst(dec, **kwargs):
     def ult(func):
+        kwargs["func"] = lambda e: not e.is_private and not e.via_bot_id and not e.fwd_from
         handler = udB["VC_HNDLR"] if udB.get("VC_HNDLR") else HNDLR
+        kwargs["pattern"] = re.compile(f"\\{handler}" + dec)
+        from_users = VC_AUTHS()
+        kwargs["from_users"] = from_users
+        vc_auth = kwargs.get("vc_auth", True)
+
+        if "vc_auth" in kwargs:
+            del kwargs["vc_auth"]
 
         async def vc_handler(e):
             VCAUTH = list(get_vc().keys())
             if not (
                 (e.out)
-                or (str(e.sender_id) in from_users)
+                or (e.sender_id in from_users)
                 or (vc_auth and e.chat_id in VCAUTH)
             ):
                 return
@@ -226,10 +238,7 @@ def vc_asst(dec, from_users=VC_AUTHS(), vc_auth=True):
 
         vcClient.add_event_handler(
             vc_handler,
-            events.NewMessage(
-                pattern=re.compile(f"\\{handler}" + dec),
-                func=lambda e: not e.is_private and not e.via_bot_id,
-            ),
+            events.NewMessage(**kwargs),
         )
 
     return ult
@@ -357,17 +366,20 @@ async def dl_playlist(chat, from_user, link):
         return song, thumb, title, vid1["link"], duration
     finally:
         for z in links[1:]:
-            search = VideosSearch(z, limit=1).result()
-            vid = search["result"][0]
-            duration = vid.get("duration") or "♾"
-            title = vid["title"]
-            thumb = f"https://i.ytimg.com/vi/{vid['id']}/hqdefault.jpg"
-            add_to_queue(chat, None, title, vid["link"], thumb, from_user, duration)
+            try:
+                search = VideosSearch(z, limit=1).result()
+                vid = search["result"][0]
+                duration = vid.get("duration") or "♾"
+                title = vid["title"]
+                thumb = f"https://i.ytimg.com/vi/{vid['id']}/hqdefault.jpg"
+                add_to_queue(chat, None, title, vid["link"], thumb, from_user, duration)
+            except Exception as er:
+                LOGS.exception(er)
 
 
 async def file_download(event, reply, fast_download=True):
     thumb = "https://telegra.ph/file/22bb2349da20c7524e4db.mp4"
-    title = reply.file.title or reply.file.name
+    title = reply.file.title or reply.file.name or str(time()) + ".mp4"
     if fast_download:
         dl = await downloader(
             "vcbot/downloads/" + reply.file.name,
@@ -379,7 +391,7 @@ async def file_download(event, reply, fast_download=True):
         dl = dl.name
     else:
         dl = await reply.download_media()
-    duration = time_formatter(reply.file.duration * 1000)
+    duration = time_formatter(reply.file.duration * 1000) if reply.file.duration else "🤷‍♂️"
     if reply.document.thumbs:
         thumb = await reply.download_media("vcbot/downloads/", thumb=-1)
     return dl, thumb, title, reply.message_link, duration
